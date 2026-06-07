@@ -43,6 +43,9 @@ interface AdminStats {
   active: number;
   pending: number;
   blocked: number;
+  paid: number;
+  grace: number;
+  overdue: number;
 }
 
 interface AdminNotification {
