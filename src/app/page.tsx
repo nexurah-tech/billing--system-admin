@@ -56,15 +56,39 @@ interface AdminNotification {
 
 export default function AdminDashboard() {
   const router = useRouter();
-  const [activeTab, setActiveTab] = useState<'shops' | 'broadcasts'>('shops');
+  const [activeTab, setActiveTab] = useState<'shops' | 'broadcasts' | 'payments' | 'qrconfig'>('shops');
   const [loading, setLoading] = useState(true);
-  const [stats, setStats] = useState<AdminStats>({ totalShops: 0, active: 0, pending: 0, blocked: 0 });
-  const [shops, setShops] = useState<Shop[]>([]);
+  const [stats, setStats] = useState<AdminStats>({ totalShops: 0, active: 0, pending: 0, blocked: 0, paid: 0, grace: 0, overdue: 0 });
+  const [shops, setShops] = useState<Shop[] | any[]>([]);
   const [notifications, setNotifications] = useState<AdminNotification[]>([]);
   
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'active' | 'blocked'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'active' | 'blocked' | 'paid' | 'grace' | 'suspended'>('all');
+
+  // QR code config states
+  const [qrConfig, setQrConfig] = useState<any>({ paymentQrCodeUrl: '', whatsappNumber: '' });
+  const [qrCodeUrlInput, setQrCodeUrlInput] = useState('');
+  const [whatsappNumberInput, setWhatsappNumberInput] = useState('');
+  const [qrSuccessMsg, setQrSuccessMsg] = useState('');
+  const [qrErrorMsg, setQrErrorMsg] = useState('');
+  const [qrLoading, setQrLoading] = useState(false);
+  const [uploadingQr, setUploadingQr] = useState(false);
+
+  // Payments audit history states
+  const [payments, setPayments] = useState<any[]>([]);
+  const [paymentsLoading, setPaymentsLoading] = useState(false);
+
+  // Manual payment recording modal states
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [selectedPaymentShopId, setSelectedPaymentShopId] = useState('');
+  const [paymentAmount, setPaymentAmount] = useState('199');
+  const [paymentMethod, setPaymentMethod] = useState<'upi' | 'cash' | 'card' | 'bank_transfer' | 'manual'>('upi');
+  const [paymentRefId, setPaymentRefId] = useState('');
+  const [paymentNotes, setPaymentNotes] = useState('');
+  const [paymentPassword, setPaymentPassword] = useState('');
+  const [paymentError, setPaymentError] = useState('');
+  const [paymentLoading, setPaymentLoading] = useState(false);
 
   // Notification Forms
   const [notifTitle, setNotifTitle] = useState('');
@@ -112,6 +136,11 @@ export default function AdminDashboard() {
       if (data.success) {
         setShops(data.shops);
         setStats(data.stats);
+        if (data.qrConfig) {
+          setQrConfig(data.qrConfig);
+          setQrCodeUrlInput(data.qrConfig.paymentQrCodeUrl || '');
+          setWhatsappNumberInput(data.qrConfig.whatsappNumber || '');
+        }
       }
     } catch (err) {
       console.error('Fetch dashboard error:', err);
@@ -130,9 +159,24 @@ export default function AdminDashboard() {
     }
   };
 
+  const fetchPayments = async () => {
+    setPaymentsLoading(true);
+    try {
+      const response = await fetch('/api/payments');
+      const data = await response.json();
+      if (data.success) {
+        setPayments(data.payments);
+      }
+    } catch (err) {
+      console.error('Fetch payments error:', err);
+    } finally {
+      setPaymentsLoading(false);
+    }
+  };
+
   const loadData = async () => {
     setLoading(true);
-    await Promise.all([fetchDashboardData(), fetchNotificationsHistory()]);
+    await Promise.all([fetchDashboardData(), fetchNotificationsHistory(), fetchPayments()]);
     setLoading(false);
   };
 
@@ -147,6 +191,38 @@ export default function AdminDashboard() {
       router.refresh();
     } catch (err) {
       console.error(err);
+    }
+  };
+
+  const handleQrFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setUploadingQr(true);
+    setQrErrorMsg('');
+    setQrSuccessMsg('');
+
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+
+      const res = await fetch('/api/upload', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await res.json();
+      if (data.success && data.imageUrl) {
+        setQrCodeUrlInput(data.imageUrl);
+        setQrSuccessMsg('QR Code uploaded successfully. Click Save Configuration to apply.');
+        setTimeout(() => setQrSuccessMsg(''), 5000);
+      } else {
+        setQrErrorMsg(data.error || 'Failed to upload QR Code image.');
+      }
+    } catch (err) {
+      setQrErrorMsg('Network error. Failed to upload.');
+    } finally {
+      setUploadingQr(false);
     }
   };
 
@@ -218,7 +294,15 @@ export default function AdminDashboard() {
       (shop.owner && shop.owner.email.toLowerCase().includes(q));
 
     const status = shop.owner ? shop.owner.status : 'inactive';
-    const matchesStatus = statusFilter === 'all' || status === statusFilter;
+    const isPaid = !shop.isExpired && shop.subscriptionStatus !== 'trialing';
+
+    let matchesStatus = true;
+    if (statusFilter === 'pending') matchesStatus = status === 'pending';
+    else if (statusFilter === 'active') matchesStatus = status === 'active';
+    else if (statusFilter === 'blocked') matchesStatus = status === 'blocked';
+    else if (statusFilter === 'paid') matchesStatus = isPaid;
+    else if (statusFilter === 'grace') matchesStatus = shop.isGracePeriod;
+    else if (statusFilter === 'suspended') matchesStatus = shop.isSuspended;
 
     return matchesSearch && matchesStatus;
   });
@@ -265,6 +349,28 @@ export default function AdminDashboard() {
           >
             <Users size={15} className={activeTab === 'shops' ? 'text-indigo-400' : 'text-slate-400'} />
             Installations Manager
+          </div>
+          <div 
+            onClick={() => { setActiveTab('payments'); setMobileMenuOpen(false); }}
+            className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-xs font-bold transition-all duration-200 cursor-pointer ${
+              activeTab === 'payments'
+                ? 'border-indigo-500 bg-indigo-500/10 text-white font-extrabold shadow-sm ring-1 ring-indigo-500/10'
+                : 'border-transparent text-slate-400 hover:bg-slate-800/50 hover:text-white'
+            }`}
+          >
+            <CreditCard size={15} className={activeTab === 'payments' ? 'text-indigo-400' : 'text-slate-400'} />
+            Payments Audit Log
+          </div>
+          <div 
+            onClick={() => { setActiveTab('qrconfig'); setMobileMenuOpen(false); }}
+            className={`flex items-center gap-3 px-4 py-3 rounded-xl border text-xs font-bold transition-all duration-200 cursor-pointer ${
+              activeTab === 'qrconfig'
+                ? 'border-indigo-500 bg-indigo-500/10 text-white font-extrabold shadow-sm ring-1 ring-indigo-500/10'
+                : 'border-transparent text-slate-400 hover:bg-slate-800/50 hover:text-white'
+            }`}
+          >
+            <Laptop size={15} className={activeTab === 'qrconfig' ? 'text-indigo-400' : 'text-slate-400'} />
+            Payment QR Config
           </div>
           <div 
             onClick={() => { setActiveTab('broadcasts'); setMobileMenuOpen(false); }}
@@ -448,9 +554,10 @@ export default function AdminDashboard() {
                 <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
                   {[
                     { value: 'all', label: 'All' },
-                    { value: 'pending', label: 'Pending' },
-                    { value: 'active', label: 'Active' },
-                    { value: 'blocked', label: 'Blocked' },
+                    { value: 'pending', label: 'Pending Approvals' },
+                    { value: 'paid', label: 'Paid' },
+                    { value: 'grace', label: 'Grace Period' },
+                    { value: 'suspended', label: 'Suspended (Overdue)' },
                   ].map((f) => (
                     <button
                       key={f.value}
@@ -501,8 +608,26 @@ export default function AdminDashboard() {
                               </td>
                               
                               <td className="py-4 px-6">
-                                <div className="space-y-0.5">
-                                  <p className="font-extrabold text-white text-xs">{shop.name}</p>
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2">
+                                    <p className="font-extrabold text-white text-xs">{shop.name}</p>
+                                    {/* Active heartbeat indicator */}
+                                    <span className="relative flex h-1.5 w-1.5 shrink-0">
+                                      {formatLastActive(shop.lastActiveAt) === 'Online Now' && (
+                                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                                      )}
+                                      <span className={`relative inline-flex rounded-full h-1.5 w-1.5 ${
+                                        formatLastActive(shop.lastActiveAt) === 'Online Now' 
+                                          ? 'bg-emerald-500' 
+                                          : formatLastActive(shop.lastActiveAt).includes('m') || formatLastActive(shop.lastActiveAt).includes('h')
+                                          ? 'bg-amber-500' 
+                                          : 'bg-slate-600'
+                                      }`} />
+                                    </span>
+                                    <span className="text-[9px] font-semibold text-slate-500">
+                                      {formatLastActive(shop.lastActiveAt)}
+                                    </span>
+                                  </div>
                                   <p className="text-[10px] text-slate-500 font-semibold">{shop.phone} · {shop.address}</p>
                                 </div>
                               </td>
@@ -525,14 +650,26 @@ export default function AdminDashboard() {
                               </td>
 
                               <td className="py-4 px-6 text-center">
-                                <span className={`inline-flex items-center px-2.5 py-1 rounded-xl text-[9.5px] font-black uppercase tracking-wider select-none ${
-                                  status === 'active'
-                                    ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/25'
-                                    : isPending
-                                    ? 'bg-amber-500/15 text-amber-400 border border-amber-500/25'
-                                    : 'bg-red-500/15 text-red-400 border border-red-500/25'
+                                <span className={`inline-flex items-center px-2.5 py-1 rounded-xl text-[9px] font-black uppercase tracking-wider select-none border ${
+                                  isPending
+                                    ? 'bg-amber-500/15 text-amber-400 border-amber-500/25'
+                                    : shop.isSuspended
+                                    ? 'bg-red-500/15 text-red-400 border-red-500/25'
+                                    : shop.isGracePeriod
+                                    ? 'bg-orange-500/15 text-orange-400 border-orange-500/25'
+                                    : shop.subscriptionStatus === 'trialing'
+                                    ? 'bg-indigo-500/15 text-indigo-400 border-indigo-500/25'
+                                    : 'bg-emerald-500/15 text-emerald-400 border-emerald-500/25'
                                 }`}>
-                                  {status}
+                                  {isPending 
+                                    ? 'Pending Approval' 
+                                    : shop.isSuspended 
+                                    ? 'Suspended' 
+                                    : shop.isGracePeriod 
+                                    ? `Grace Period (${shop.graceDaysLeft}d)` 
+                                    : shop.subscriptionStatus === 'trialing'
+                                    ? 'Trialing'
+                                    : 'Paid'}
                                 </span>
                               </td>
 
@@ -546,35 +683,55 @@ export default function AdminDashboard() {
                                         setApproveError('');
                                         setShowApproveModal(true);
                                       }}
-                                      className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-[10.5px] font-black rounded-lg transition-colors cursor-pointer flex items-center gap-1 shadow-sm"
+                                      className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-[10.5px] font-black rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
                                     >
                                       <Check size={12} strokeWidth={3} />
                                       Approve Terminal
                                     </button>
                                   ) : (
-                                    // Block/Unblock toggle switch
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-[10px] text-slate-500 font-bold select-none">
-                                        {isBlocked ? 'Blocked' : 'Active'}
-                                      </span>
+                                    // Block/Unblock toggle switch and Manual Payment Logger
+                                    <div className="flex items-center gap-3">
                                       <button
-                                        type="button"
                                         onClick={() => {
-                                          if (isBlocked) {
-                                            handleShopAction(shop.id, 'unblock');
-                                          } else {
-                                            setSelectedBlockShopId(shop.id);
-                                            setBlockReasonOption('Subscription Payment Overdue');
-                                            setCustomBlockReason('');
-                                            setShowBlockReasonModal(true);
-                                          }
+                                          setSelectedPaymentShopId(shop.id);
+                                          setPaymentAmount('199');
+                                          setPaymentMethod('upi');
+                                          setPaymentRefId('');
+                                          setPaymentNotes('');
+                                          setPaymentPassword('');
+                                          setPaymentError('');
+                                          setShowPaymentModal(true);
                                         }}
-                                        className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer focus:outline-none flex items-center ${
-                                          isBlocked ? 'bg-red-500 justify-end' : 'bg-slate-700 justify-start'
-                                        }`}
+                                        className="px-2 py-1.5 bg-emerald-500/10 border border-emerald-500/20 hover:bg-emerald-500/20 text-emerald-400 text-[10px] font-black rounded-lg transition-colors cursor-pointer flex items-center gap-1.5"
+                                        title="Log manual subscription payment"
                                       >
-                                        <span className="w-4 h-4 rounded-full bg-white shadow-sm block transition-all" />
+                                        <CreditCard size={11} />
+                                        Log Pay
                                       </button>
+
+                                      <div className="flex items-center gap-1.5">
+                                        <span className="text-[10px] text-slate-500 font-bold select-none">
+                                          {isBlocked ? 'Blocked' : 'Active'}
+                                        </span>
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (isBlocked) {
+                                              handleShopAction(shop.id, 'unblock');
+                                            } else {
+                                              setSelectedBlockShopId(shop.id);
+                                              setBlockReasonOption('Subscription Payment Overdue');
+                                              setCustomBlockReason('');
+                                              setShowBlockReasonModal(true);
+                                            }
+                                          }}
+                                          className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer focus:outline-none flex items-center ${
+                                            isBlocked ? 'bg-red-500 justify-end' : 'bg-slate-700 justify-start'
+                                          }`}
+                                        >
+                                          <span className="w-4 h-4 rounded-full bg-white shadow-sm block transition-all" />
+                                        </button>
+                                      </div>
                                     </div>
                                   )}
 
@@ -613,7 +770,7 @@ export default function AdminDashboard() {
               </div>
             </div>
 
-          ) : (
+          ) : activeTab === 'broadcasts' ? (
             
             // ── TAB: SYSTEM NOTIFICATIONS & BROADCASTS ──
             <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start animate-in fade-in duration-200">
@@ -849,10 +1006,238 @@ export default function AdminDashboard() {
               </div>
 
             </div>
+          ) : activeTab === 'payments' ? (
+            // ── TAB: SYSTEM PAYMENTS HISTORY ──
+            <div className="space-y-4 animate-in fade-in duration-200">
+              <div className="bg-slate-900/60 border border-slate-800/80 p-5 rounded-2xl shadow-sm">
+                <div className="pb-4 border-b border-slate-800/60 flex justify-between items-center select-none">
+                  <div>
+                    <h3 className="text-sm font-black text-white">System Payments History</h3>
+                    <p className="text-[10px] text-slate-500 mt-1 font-semibold leading-normal">
+                      Verify and audit all manual subscription payments recorded for retail billing terminals.
+                    </p>
+                  </div>
+                  <button 
+                    onClick={fetchPayments} 
+                    className="px-3.5 py-1.5 bg-slate-950 hover:bg-slate-800 border border-slate-800 text-slate-300 hover:text-white text-[10px] font-bold rounded-lg transition-colors cursor-pointer"
+                  >
+                    Refresh Logs
+                  </button>
+                </div>
+
+                <div className="overflow-x-auto mt-4">
+                  <table className="w-full text-left border-collapse min-w-[700px]">
+                    <thead>
+                      <tr className="border-b border-slate-800/80 text-[9px] font-black text-slate-500 uppercase tracking-widest bg-slate-955/20 select-none">
+                        <th className="py-3 px-4 w-12 text-center">No</th>
+                        <th className="py-3 px-4">Terminal Name</th>
+                        <th className="py-3 px-4 w-28 text-center">Amount</th>
+                        <th className="py-3 px-4 w-28 text-center">Date</th>
+                        <th className="py-3 px-4">Billing Period Start / End</th>
+                        <th className="py-3 px-4 w-32 font-bold text-center">Payment Method</th>
+                        <th className="py-3 px-4">Reference ID</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-800/35 text-xs">
+                      {paymentsLoading ? (
+                        <tr>
+                          <td colSpan={7} className="py-12 text-center text-slate-500 font-bold select-none border-none">
+                            Loading transaction audits...
+                          </td>
+                        </tr>
+                      ) : payments.length === 0 ? (
+                        <tr>
+                          <td colSpan={7} className="py-12 text-center text-slate-500 font-bold select-none border-none">
+                            No payment transactions logged in system.
+                          </td>
+                        </tr>
+                      ) : (
+                        payments.map((p, index) => (
+                          <tr key={p.id} className="hover:bg-slate-900/10">
+                            <td className="py-3.5 px-4 text-center font-mono font-bold text-slate-550">
+                              {index + 1}
+                            </td>
+                            <td className="py-3.5 px-4">
+                              <p className="font-extrabold text-white text-xs">{p.shop?.name || 'Unknown Store'}</p>
+                              <p className="text-[9.5px] text-slate-500 font-semibold">{p.shop?.phone || ''}</p>
+                            </td>
+                            <td className="py-3.5 px-4 text-center font-mono font-black text-indigo-400">
+                              ₹{p.amount}
+                            </td>
+                            <td className="py-3.5 px-4 text-center font-mono text-[10.5px] text-slate-400">
+                              {new Date(p.paymentDate).toLocaleDateString('en-IN', {
+                                day: '2-digit', month: 'short', year: 'numeric'
+                              })}
+                            </td>
+                            <td className="py-3.5 px-4 font-mono text-[10px] text-slate-400">
+                              {new Date(p.billingPeriodStart).toLocaleDateString('en-IN', { day: '2-digit', month: 'short' })}
+                              {' → '}
+                              {new Date(p.billingPeriodEnd).toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })}
+                            </td>
+                            <td className="py-3.5 px-4 text-center">
+                              <span className="inline-flex items-center px-2 py-0.5 rounded-lg text-[9px] font-black uppercase tracking-wider bg-slate-950 border border-slate-800 text-slate-400">
+                                {p.paymentMethod}
+                              </span>
+                            </td>
+                            <td className="py-3.5 px-4 font-mono text-[10.5px] text-slate-300">
+                              {p.referenceId || <span className="text-slate-655 italic">None</span>}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          ) : (
+            // ── TAB: PAYMENT QR & CONTACT CONFIGURATION ──
+            <div className="max-w-xl mx-auto space-y-4 animate-in fade-in duration-200">
+              <div className="bg-slate-900/60 border border-slate-800/80 p-6 rounded-2xl shadow-sm space-y-5">
+                <div>
+                  <h3 className="text-sm font-black text-white">Payment Configuration Manager</h3>
+                  <p className="text-[10px] text-slate-500 mt-1 font-semibold leading-normal">
+                    Update the UPI Payment QR Code and manual verification WhatsApp number displayed to locked or warning retailers.
+                  </p>
+                </div>
+
+                {qrSuccessMsg && (
+                  <div className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 p-3.5 rounded-xl text-xs font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-1 duration-150">
+                    <CheckCircle2 size={14} className="shrink-0" />
+                    <span>{qrSuccessMsg}</span>
+                  </div>
+                )}
+                {qrErrorMsg && (
+                  <div className="bg-red-500/10 border border-red-500/20 text-red-400 p-3.5 rounded-xl text-xs font-semibold flex items-center gap-2 animate-in fade-in slide-in-from-top-1 duration-150">
+                    <AlertCircle size={14} className="shrink-0" />
+                    <span>{qrErrorMsg}</span>
+                  </div>
+                )}
+
+                <form onSubmit={async (e) => {
+                  e.preventDefault();
+                  setQrLoading(true);
+                  setQrSuccessMsg('');
+                  setQrErrorMsg('');
+                  try {
+                    const res = await fetch('/api/shops', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({
+                        action: 'update-qr',
+                        paymentQrCodeUrl: qrCodeUrlInput,
+                        whatsappNumber: whatsappNumberInput
+                      })
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                      setQrSuccessMsg(data.message);
+                      setQrConfig({ paymentQrCodeUrl: qrCodeUrlInput, whatsappNumber: whatsappNumberInput });
+                      setTimeout(() => setQrSuccessMsg(''), 5000);
+                    } else {
+                      setQrErrorMsg(data.error || 'Failed to update configurations.');
+                    }
+                  } catch (err) {
+                    setQrErrorMsg('Network error. Please try again.');
+                  } finally {
+                    setQrLoading(false);
+                  }
+                }} className="space-y-4">
+                  <div className="space-y-4 p-4.5 bg-slate-950 border border-slate-900 rounded-2xl">
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block pl-0.5">
+                        Upload UPI QR Code Image
+                      </label>
+                      <div className="flex items-center gap-3">
+                        <input
+                          type="file"
+                          accept="image/*"
+                          onChange={handleQrFileUpload}
+                          disabled={uploadingQr}
+                          className="hidden"
+                          id="qr-image-upload"
+                        />
+                        <label
+                          htmlFor="qr-image-upload"
+                          className="flex-grow flex items-center justify-center gap-2 border border-dashed border-slate-800 hover:border-indigo-500 bg-slate-900 rounded-xl px-4 py-3.5 text-xs font-bold text-slate-400 hover:text-white transition-all cursor-pointer select-none"
+                        >
+                          {uploadingQr ? (
+                            <span className="flex items-center gap-2">
+                              <span className="w-3.5 h-3.5 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin" />
+                              Uploading to Cloudinary...
+                            </span>
+                          ) : (
+                            'Choose QR Image File...'
+                          )}
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="relative flex py-1 items-center">
+                      <div className="flex-grow border-t border-slate-900"></div>
+                      <span className="flex-shrink mx-3 text-[9px] font-black text-slate-600 uppercase tracking-widest">Or</span>
+                      <div className="flex-grow border-t border-slate-900"></div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block pl-0.5">
+                        Paste QR Code Image URL
+                      </label>
+                      <input
+                        type="url"
+                        required
+                        value={qrCodeUrlInput}
+                        onChange={(e) => setQrCodeUrlInput(e.target.value)}
+                        placeholder="https://res.cloudinary.com/..."
+                        className="w-full bg-slate-900 border border-slate-800 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-xs placeholder:text-slate-655 focus:outline-none transition-all font-semibold text-white"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest block pl-0.5">
+                      WhatsApp Contact Number
+                    </label>
+                    <input
+                      type="text"
+                      required
+                      value={whatsappNumberInput}
+                      onChange={(e) => setWhatsappNumberInput(e.target.value)}
+                      placeholder="e.g. +91 96009 50190"
+                      className="w-full bg-slate-950 border border-slate-800 focus:border-indigo-500 rounded-xl px-3.5 py-2.5 text-xs placeholder:text-slate-655 focus:outline-none transition-all font-semibold text-white"
+                    />
+                  </div>
+
+                  {/* QR code preview */}
+                  {qrCodeUrlInput && (
+                    <div className="p-4 bg-slate-950 border border-slate-900 rounded-2xl flex flex-col items-center space-y-2.5 select-none">
+                      <p className="text-[8.5px] font-black text-slate-500 uppercase tracking-widest block pl-0.5">Live Preview QR Code</p>
+                      <img 
+                        src={qrCodeUrlInput} 
+                        alt="UPI QR Code Preview" 
+                        className="size-40 object-contain rounded-lg border border-slate-800 bg-white p-1"
+                        onError={(e) => {
+                          (e.target as HTMLImageElement).src = 'https://res.cloudinary.com/dihkz12e6/image/upload/v1700000000/mock-qr.png';
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  <button
+                    type="submit"
+                    disabled={qrLoading}
+                    className="w-full bg-indigo-650 hover:bg-indigo-600 text-white flex items-center justify-center gap-1.5 h-11 rounded-xl text-xs font-black tracking-wide shadow-md transition-all active:scale-98 cursor-pointer disabled:opacity-50"
+                  >
+                    {qrLoading ? 'Updating configurations...' : 'Save Configuration'}
+                  </button>
+                </form>
+              </div>
+            </div>
           )}
 
         </div>
       </main>
+
 
       {/* ── Block Reason Modal Overlay ── */}
       {showBlockReasonModal && (
@@ -1204,6 +1589,186 @@ export default function AdminDashboard() {
         </div>
       )}
 
+      {/* ── Record manual subscription payment modal overlay ── */}
+      {showPaymentModal && (
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-955/80 backdrop-blur-md p-4 animate-in fade-in duration-200 select-none">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden animate-in zoom-in-95 duration-300">
+            {/* Emerald top bar accent */}
+            <div className="h-1.5 w-full bg-gradient-to-r from-emerald-500 via-indigo-500 to-emerald-655" />
+
+            <div className="p-7 space-y-5 select-text">
+              {/* Header */}
+              <div className="text-center space-y-1.5 select-none">
+                <div className="size-14 rounded-2xl bg-emerald-500/10 text-emerald-400 flex items-center justify-center mx-auto border border-emerald-500/20 shadow-sm animate-pulse">
+                  <CreditCard size={24} strokeWidth={2} />
+                </div>
+                <h3 className="text-base font-black text-white tracking-tight">Record Manual Payment</h3>
+                <p className="text-[10.5px] text-slate-400 leading-normal font-semibold">
+                  Manually record a renewal transaction for this billing terminal. This will automatically extend their subscription by 30 days and unlock terminal POS access.
+                </p>
+              </div>
+
+              {/* Form Inputs */}
+              <div className="space-y-3 text-left">
+                <div className="space-y-1.5">
+                  <label className="text-[9.5px] font-black text-slate-400 uppercase tracking-widest block pl-0.5">
+                    Renew Amount (INR)
+                  </label>
+                  <input
+                    type="number"
+                    required
+                    value={paymentAmount}
+                    onChange={(e) => setPaymentAmount(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-white"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[9.5px] font-black text-slate-400 uppercase tracking-widest block pl-0.5">
+                    Payment Method
+                  </label>
+                  <select
+                    value={paymentMethod}
+                    onChange={(e) => setPaymentMethod(e.target.value as any)}
+                    className="w-full bg-slate-950 border border-slate-800 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10 rounded-xl px-3 py-2 text-xs font-semibold text-slate-350"
+                  >
+                    <option value="upi">UPI Transfer</option>
+                    <option value="cash">Cash Payment</option>
+                    <option value="bank_transfer">Bank Transfer</option>
+                    <option value="card">Card Swipe</option>
+                    <option value="manual">Other Manual</option>
+                  </select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[9.5px] font-black text-slate-400 uppercase tracking-widest block pl-0.5">
+                    Transaction Ref ID (UPI ID / Ref)
+                  </label>
+                  <input
+                    type="text"
+                    value={paymentRefId}
+                    onChange={(e) => setPaymentRefId(e.target.value)}
+                    placeholder="e.g. txn_987654321..."
+                    className="w-full bg-slate-950 border border-slate-800 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-white font-mono"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[9.5px] font-black text-slate-400 uppercase tracking-widest block pl-0.5">
+                    Administrative Notes
+                  </label>
+                  <input
+                    type="text"
+                    value={paymentNotes}
+                    onChange={(e) => setPaymentNotes(e.target.value)}
+                    placeholder="e.g. Verified transaction on WhatsApp screenshot..."
+                    className="w-full bg-slate-950 border border-slate-800 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10 rounded-xl px-3.5 py-2.5 text-xs font-semibold text-white"
+                  />
+                </div>
+              </div>
+
+              {/* Security Authorization */}
+              <div className="space-y-1.5 pt-2 border-t border-slate-800/60 text-left select-none">
+                <label className="text-[9.5px] font-black text-slate-400 uppercase tracking-widest block pl-0.5">
+                  Admin Authorization Password
+                </label>
+                <input
+                  type="password"
+                  required
+                  value={paymentPassword}
+                  onChange={(e) => setPaymentPassword(e.target.value)}
+                  placeholder="Enter admin password..."
+                  className="w-full bg-slate-950 border border-slate-800 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-555/10 rounded-xl px-3.5 py-2.5 text-xs placeholder:text-slate-650 focus:outline-none transition-all font-semibold text-white"
+                />
+                {paymentError && (
+                  <p className="text-[10px] font-bold text-red-400 pl-0.5 animate-pulse mt-1">{paymentError}</p>
+                )}
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex gap-2.5 pt-2 select-none">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowPaymentModal(false);
+                    setPaymentPassword('');
+                    setPaymentError('');
+                  }}
+                  className="flex-1 py-2.5 bg-slate-800 hover:bg-slate-700 hover:text-white text-slate-300 text-xs font-black rounded-xl transition-all cursor-pointer select-none active:scale-98"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  disabled={paymentLoading}
+                  onClick={async () => {
+                    const correctPassword = process.env.NEXT_PUBLIC_ADMIN_AUTH_PASSWORD || 'nexurah123@';
+                    if (paymentPassword !== correctPassword) {
+                      setPaymentError('Invalid admin verification password.');
+                      return;
+                    }
+
+                    setPaymentLoading(true);
+                    setPaymentError('');
+                    try {
+                      const res = await fetch('/api/shops', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                          action: 'record-payment',
+                          shopId: selectedPaymentShopId,
+                          amount: Number(paymentAmount) || 199,
+                          paymentMethod,
+                          referenceId: paymentRefId,
+                          notes: paymentNotes
+                        })
+                      });
+                      const data = await res.json();
+                      if (data.success) {
+                        setShowPaymentModal(false);
+                        setPaymentPassword('');
+                        setPaymentError('');
+                        fetchDashboardData();
+                        fetchPayments();
+                      } else {
+                        setPaymentError(data.error || 'Failed to record payment.');
+                      }
+                    } catch (err) {
+                      setPaymentError('Network error. Please try again.');
+                    } finally {
+                      setPaymentLoading(false);
+                    }
+                  }}
+                  className="flex-grow-[1.5] py-2.5 bg-emerald-600 hover:bg-emerald-550 text-white text-xs font-black rounded-xl shadow-md transition-all cursor-pointer select-none active:scale-98 flex items-center justify-center gap-1.5"
+                >
+                  {paymentLoading ? 'Logging...' : 'Confirm & Activate'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
+}
+
+function formatLastActive(lastActiveAt: any) {
+  if (!lastActiveAt) return 'Inactive';
+  const lastActiveDate = new Date(lastActiveAt);
+  const now = new Date();
+  const diffTime = now.getTime() - lastActiveDate.getTime();
+  const diffMinutes = Math.floor(diffTime / (1000 * 60));
+  const diffHours = Math.floor(diffTime / (1000 * 60 * 65));
+  const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+
+  if (diffMinutes < 5) {
+    return 'Online Now';
+  } else if (diffMinutes < 60) {
+    return `Active ${diffMinutes}m ago`;
+  } else if (diffHours < 24) {
+    return `Active ${diffHours}h ago`;
+  } else {
+    return `Active ${diffDays}d ago`;
+  }
 }

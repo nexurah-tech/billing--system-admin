@@ -3,6 +3,8 @@ import jwt from 'jsonwebtoken';
 import { connectDB } from '@/lib/db';
 import Shop from '@/models/Shop';
 import User from '@/models/User';
+import Payment from '@/models/Payment';
+import SystemConfig from '@/models/SystemConfig';
 import { sendWhatsAppApprovalMessage } from '@/lib/whatsapp';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'super-secret-admin';
@@ -31,11 +33,26 @@ export async function GET(request: NextRequest) {
     // Fetch all shops
     const shops = await Shop.find().sort({ createdAt: -1 });
     
+    // Fetch global config
+    let qrConfig = await SystemConfig.findOne();
+    if (!qrConfig) {
+      qrConfig = await SystemConfig.create({
+        paymentQrCodeUrl: 'https://res.cloudinary.com/dihkz12e6/image/upload/v1700000000/mock-qr.png',
+        whatsappNumber: '+919600950190'
+      });
+    }
+
     // Fetch user owners and build the final formatted list
     const formattedShops = [];
     let pendingCount = 0;
     let blockedCount = 0;
     let activeCount = 0;
+
+    let paidCount = 0;
+    let graceCount = 0;
+    let overdueCount = 0;
+
+    const now = new Date();
 
     for (const shop of shops) {
       // Find owner of this shop
@@ -47,6 +64,19 @@ export async function GET(request: NextRequest) {
       else if (status === 'blocked') blockedCount++;
       else if (status === 'active') activeCount++;
 
+      // Compute subscription payment states
+      const expiresAt = new Date(shop.subscriptionExpiresAt || now);
+      const diffTime = now.getTime() - expiresAt.getTime();
+      const diffDays = Math.floor(diffTime / (1000 * 60 * 60 * 24));
+      
+      let isExpired = now > expiresAt;
+      let isGracePeriod = isExpired && diffDays <= 3;
+      let isSuspended = isExpired && diffDays > 3;
+
+      if (isSuspended) overdueCount++;
+      else if (isGracePeriod) graceCount++;
+      else paidCount++;
+
       formattedShops.push({
         id: shop._id,
         name: shop.name,
@@ -54,6 +84,15 @@ export async function GET(request: NextRequest) {
         phone: shop.phone,
         email: shop.email,
         createdAt: shop.createdAt,
+        subscriptionStatus: shop.subscriptionStatus || 'trialing',
+        subscriptionExpiresAt: shop.subscriptionExpiresAt,
+        lastPaymentDate: shop.lastPaymentDate,
+        lastActiveAt: shop.lastActiveAt || shop.updatedAt,
+        trialEndsAt: shop.trialEndsAt,
+        isExpired,
+        isGracePeriod,
+        isSuspended,
+        graceDaysLeft: isGracePeriod ? Math.max(0, 3 - diffDays) : 0,
         owner: owner ? {
           id: owner._id,
           name: owner.name,
@@ -70,6 +109,13 @@ export async function GET(request: NextRequest) {
         active: activeCount,
         pending: pendingCount,
         blocked: blockedCount,
+        paid: paidCount,
+        grace: graceCount,
+        overdue: overdueCount,
+      },
+      qrConfig: {
+        paymentQrCodeUrl: qrConfig.paymentQrCodeUrl,
+        whatsappNumber: qrConfig.whatsappNumber,
       },
       shops: formattedShops,
     });
@@ -93,14 +139,86 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const { action, shopId } = body;
 
-    if (!action || !shopId) {
-      return NextResponse.json({ success: false, error: 'action and shopId are required' }, { status: 400 });
+    if (!action) {
+      return NextResponse.json({ success: false, error: 'action is required' }, { status: 400 });
+    }
+
+    // Handle global QR update action (does not require shopId)
+    if (action === 'update-qr') {
+      const { paymentQrCodeUrl, whatsappNumber } = body;
+      let qrConfig = await SystemConfig.findOne();
+      if (!qrConfig) {
+        qrConfig = new SystemConfig();
+      }
+      if (paymentQrCodeUrl) qrConfig.paymentQrCodeUrl = paymentQrCodeUrl;
+      if (whatsappNumber) qrConfig.whatsappNumber = whatsappNumber;
+      await qrConfig.save();
+
+      return NextResponse.json({ success: true, message: 'QR Code configurations updated successfully.' });
+    }
+
+    if (!shopId) {
+      return NextResponse.json({ success: false, error: 'shopId is required' }, { status: 400 });
     }
 
     // Find the owner of this shop
     const owner = await User.findOne({ shop: shopId, role: 'owner' });
-    if (!owner && action !== 'delete') {
+    if (!owner && action !== 'delete' && action !== 'record-payment') {
       return NextResponse.json({ success: false, error: 'Shop owner not found' }, { status: 404 });
+    }
+
+    // Record manual subscription payment
+    if (action === 'record-payment') {
+      const { amount, paymentMethod, referenceId, notes } = body;
+      const shop = await Shop.findById(shopId);
+      if (!shop) {
+        return NextResponse.json({ success: false, error: 'Shop not found' }, { status: 404 });
+      }
+
+      const paymentAmt = Number(amount) || 199;
+      const now = new Date();
+      const currentExpiry = shop.subscriptionExpiresAt ? new Date(shop.subscriptionExpiresAt) : now;
+      
+      // If current expiry is in the future, stack the renewal. Otherwise start from now.
+      const billingPeriodStart = currentExpiry > now ? currentExpiry : now;
+      const billingPeriodEnd = new Date(billingPeriodStart.getTime() + 30 * 24 * 60 * 60 * 1000); // add 30 days
+
+      // Log Payment transaction
+      const paymentLog = await Payment.create({
+        shop: shopId,
+        amount: paymentAmt,
+        paymentDate: now,
+        billingPeriodStart,
+        billingPeriodEnd,
+        status: 'paid',
+        paymentMethod: paymentMethod || 'manual',
+        referenceId: referenceId || '',
+        notes: notes || 'Manual administrative payment entry',
+      });
+
+      // Update shop details
+      shop.subscriptionStatus = 'active';
+      shop.subscriptionExpiresAt = billingPeriodEnd;
+      shop.lastPaymentDate = now;
+      await shop.save();
+
+      // Automatically unblock owner/staff users if blocked for subscription
+      if (owner && (owner.status === 'blocked' || owner.blockReason?.includes('Subscription'))) {
+        owner.status = 'active';
+        owner.blockReason = '';
+        await owner.save();
+
+        await User.updateMany(
+          { shop: shopId, role: 'staff', status: 'blocked' },
+          { status: 'active', blockReason: '' }
+        );
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: 'Payment logged and subscription extended successfully.',
+        payment: paymentLog
+      });
     }
 
     if (action === 'approve') {
@@ -131,39 +249,16 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ success: false, error: 'Shop owner not found' }, { status: 404 });
       }
       const { reason } = body;
-      console.log('=== ADMIN BLOCK ACTION ===');
-      console.log('Shop ID:', shopId);
-      console.log('Block Reason received:', reason);
       
       owner.status = 'blocked';
       owner.blockReason = reason || 'Subscription Payment Overdue';
-      
-      console.log('Owner model before save:', {
-        id: owner._id,
-        name: owner.name,
-        email: owner.email,
-        status: owner.status,
-        blockReason: owner.blockReason
-      });
-
       await owner.save();
       
-      const updatedOwner = await User.findById(owner._id);
-      console.log('Owner model after save (fetched fresh):', {
-        id: updatedOwner?._id,
-        name: updatedOwner?.name,
-        email: updatedOwner?.email,
-        status: updatedOwner?.status,
-        blockReason: updatedOwner?.blockReason
-      });
-
       // Also restrict staff users and mirror block reason
-      const updateStaffResult = await User.updateMany(
+      await User.updateMany(
         { shop: shopId, role: 'staff' },
         { status: 'blocked', blockReason: reason || 'Subscription Payment Overdue' }
       );
-      console.log('Staff update result:', updateStaffResult);
-      console.log('==========================');
 
       return NextResponse.json({ success: true, message: 'Shop blocked successfully' });
     } 

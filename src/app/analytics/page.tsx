@@ -27,11 +27,15 @@ interface AdminStats {
   active: number;
   pending: number;
   blocked: number;
+  paid?: number;
+  grace?: number;
+  overdue?: number;
 }
 
 export default function AnalyticsPage() {
   const router = useRouter();
-  const [stats, setStats] = useState<AdminStats>({ totalShops: 0, active: 0, pending: 0, blocked: 0 });
+  const [stats, setStats] = useState<AdminStats>({ totalShops: 0, active: 0, pending: 0, blocked: 0, paid: 0, grace: 0, overdue: 0 });
+  const [payments, setPayments] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -47,11 +51,28 @@ export default function AnalyticsPage() {
         }
       } catch (err) {
         console.error('Fetch stats error:', err);
-      } finally {
-        setLoading(false);
       }
     };
-    fetchStats();
+
+    const fetchPayments = async () => {
+      try {
+        const response = await fetch('/api/payments');
+        const data = await response.json();
+        if (data.success) {
+          setPayments(data.payments);
+        }
+      } catch (err) {
+        console.error('Fetch payments error:', err);
+      }
+    };
+
+    const loadAnalytics = async () => {
+      setLoading(true);
+      await Promise.all([fetchStats(), fetchPayments()]);
+      setLoading(false);
+    };
+
+    loadAnalytics();
   }, []);
 
   const handleLogout = async () => {
@@ -64,9 +85,10 @@ export default function AnalyticsPage() {
     }
   };
 
-  const monthlyMRR = stats.active * MONTHLY_FEE;
+  const totalCollected = payments.reduce((acc, curr) => acc + (Number(curr.amount) || 0), 0);
+  const monthlyMRR = (stats.paid || 0) * MONTHLY_FEE;
   const annualForecast = monthlyMRR * 12;
-  const healthPct = stats.totalShops > 0 ? Math.round((stats.active / stats.totalShops) * 100) : 0;
+  const healthPct = stats.totalShops > 0 ? Math.round(((stats.paid || stats.active || 0) / stats.totalShops) * 100) : 0;
 
   const diagnostics = [
     {
@@ -232,28 +254,32 @@ export default function AnalyticsPage() {
               {/* Revenue breakdown table */}
               <div className="bg-slate-950 border border-slate-900 rounded-xl divide-y divide-slate-900">
                 <div className="flex justify-between items-center px-4 py-3 text-xs">
-                  <span className="text-slate-400 font-bold">Standard Tier Fee</span>
+                  <span className="text-slate-400 font-bold">Standard Subscription Fee</span>
                   <span className="font-extrabold text-white">₹{MONTHLY_FEE} / shop / month</span>
                 </div>
                 <div className="flex justify-between items-center px-4 py-3 text-xs">
-                  <span className="text-slate-400 font-bold">Active Cashier Terminals</span>
-                  <span className="font-mono font-black text-emerald-400">{loading ? '--' : stats.active} Terminals</span>
+                  <span className="text-slate-400 font-bold">Paid Terminals (Active)</span>
+                  <span className="font-mono font-black text-emerald-400">{loading ? '--' : stats.paid} Terminals</span>
                 </div>
                 <div className="flex justify-between items-center px-4 py-3 text-xs">
-                  <span className="text-slate-400 font-bold">Pending (Unpaid Revenue)</span>
-                  <span className="font-mono font-bold text-amber-400">{loading ? '--' : stats.pending} Terminals</span>
+                  <span className="text-slate-400 font-bold">Grace Period (Unpaid)</span>
+                  <span className="font-mono font-bold text-amber-400">{loading ? '--' : stats.grace} Terminals</span>
+                </div>
+                <div className="flex justify-between items-center px-4 py-3 text-xs">
+                  <span className="text-slate-400 font-bold">Suspended (Blocked)</span>
+                  <span className="font-mono font-bold text-red-400">{loading ? '--' : stats.overdue} Terminals</span>
                 </div>
                 <div className="flex justify-between items-end px-4 py-4">
                   <div>
-                    <p className="text-[9px] text-slate-500 font-black uppercase tracking-widest">Potential Monthly MRR</p>
-                    <p className="text-2xl font-black font-mono tracking-tight text-indigo-400 leading-tight mt-0.5">
-                      ₹{loading ? '--' : monthlyMRR.toLocaleString('en-IN')}
+                    <p className="text-[9px] text-slate-500 font-black uppercase tracking-widest">Total Revenue Collected</p>
+                    <p className="text-2xl font-black font-mono tracking-tight text-emerald-400 leading-tight mt-0.5">
+                      ₹{loading ? '--' : totalCollected.toLocaleString('en-IN')}
                     </p>
                   </div>
                   <div className="text-right">
-                    <p className="text-[9px] text-slate-500 font-black uppercase tracking-widest">Annual Forecast</p>
-                    <p className="text-lg font-extrabold font-mono tracking-tight text-slate-300 leading-tight mt-0.5">
-                      ₹{loading ? '--' : annualForecast.toLocaleString('en-IN')}
+                    <p className="text-[9px] text-slate-500 font-black uppercase tracking-widest">Monthly MRR Forecast</p>
+                    <p className="text-lg font-extrabold font-mono tracking-tight text-indigo-400 leading-tight mt-0.5">
+                      ₹{loading ? '--' : monthlyMRR.toLocaleString('en-IN')}
                     </p>
                   </div>
                 </div>
@@ -270,30 +296,30 @@ export default function AnalyticsPage() {
                 <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden flex border border-slate-900">
                   <div
                     className="bg-emerald-500 transition-all duration-700 ease-out"
-                    style={{ width: `${stats.totalShops > 0 ? (stats.active / stats.totalShops) * 100 : 0}%` }}
+                    style={{ width: `${stats.totalShops > 0 ? ((stats.paid || 0) / stats.totalShops) * 100 : 0}%` }}
                   />
                   <div
                     className="bg-amber-500 transition-all duration-700 ease-out"
-                    style={{ width: `${stats.totalShops > 0 ? (stats.pending / stats.totalShops) * 100 : 0}%` }}
+                    style={{ width: `${stats.totalShops > 0 ? ((stats.grace || 0) / stats.totalShops) * 100 : 0}%` }}
                   />
                   <div
                     className="bg-red-500 transition-all duration-700 ease-out"
-                    style={{ width: `${stats.totalShops > 0 ? (stats.blocked / stats.totalShops) * 100 : 0}%` }}
+                    style={{ width: `${stats.totalShops > 0 ? ((stats.overdue || 0) / stats.totalShops) * 100 : 0}%` }}
                   />
                 </div>
                 <div className="flex justify-between text-[9px] font-bold text-slate-500">
-                  <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-emerald-500" />{stats.active} Active</span>
-                  <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-amber-500" />{stats.pending} Pending</span>
-                  <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-red-500" />{stats.blocked} Blocked</span>
+                  <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-emerald-500" />{stats.paid} Paid</span>
+                  <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-amber-500" />{stats.grace} Grace Period</span>
+                  <span className="flex items-center gap-1"><span className="size-1.5 rounded-full bg-red-500" />{stats.overdue} Suspended</span>
                 </div>
               </div>
 
               {/* Tier breakdown visual */}
               <div className="grid grid-cols-3 gap-3">
                 {[
-                  { label: 'Active MRR', value: `₹${(stats.active * MONTHLY_FEE).toLocaleString('en-IN')}`, color: 'text-emerald-400 border-emerald-500/20 bg-emerald-500/5' },
-                  { label: 'Potential Pending', value: `₹${(stats.pending * MONTHLY_FEE).toLocaleString('en-IN')}`, color: 'text-amber-400 border-amber-500/20 bg-amber-500/5' },
-                  { label: 'Lost (Blocked)', value: `₹${(stats.blocked * MONTHLY_FEE).toLocaleString('en-IN')}`, color: 'text-red-400 border-red-500/20 bg-red-500/5' },
+                  { label: 'Active MRR', value: `₹${((stats.paid || 0) * MONTHLY_FEE).toLocaleString('en-IN')}`, color: 'text-emerald-400 border-emerald-500/20 bg-emerald-500/5' },
+                  { label: 'Grace MRR', value: `₹${((stats.grace || 0) * MONTHLY_FEE).toLocaleString('en-IN')}`, color: 'text-amber-400 border-amber-500/20 bg-amber-500/5' },
+                  { label: 'Suspended Lost', value: `₹${((stats.overdue || 0) * MONTHLY_FEE).toLocaleString('en-IN')}`, color: 'text-red-400 border-red-500/20 bg-red-500/5' },
                 ].map((item, i) => (
                   <div key={i} className={`rounded-xl border p-3 text-center space-y-1 ${item.color}`}>
                     <p className="text-[8.5px] font-black uppercase tracking-widest text-slate-500">{item.label}</p>
