@@ -20,6 +20,8 @@ import {
   BarChart3,
   IndianRupee,
   Activity,
+  CreditCard,
+  UserCheck,
 } from 'lucide-react';
 
 interface AdminStats {
@@ -165,6 +167,25 @@ export default function AnalyticsPage() {
           >
             <Users size={15} className="text-slate-400" />
             Installations Manager
+          </Link>
+
+          <Link href="/billing" onClick={() => setMobileMenuOpen(false)}
+            className="flex items-center gap-3 px-4 py-3 rounded-xl border border-transparent text-slate-400 hover:bg-slate-800/50 hover:text-white text-xs font-bold transition-all duration-200 cursor-pointer"
+          >
+            <CreditCard size={15} className="text-slate-400" />
+            Subscription Ledger
+          </Link>
+
+          <Link href="/approvals" onClick={() => setMobileMenuOpen(false)}
+            className="flex items-center gap-3 px-4 py-3 rounded-xl border border-transparent text-slate-400 hover:bg-slate-800/50 hover:text-white text-xs font-bold transition-all duration-200 cursor-pointer relative"
+          >
+            <UserCheck size={15} className="text-slate-400" />
+            Pending Approvals
+            {stats.pending > 0 && (
+              <span className="ml-auto flex h-5 w-5 items-center justify-center rounded-full bg-amber-500 text-[9px] font-black text-white shrink-0">
+                {stats.pending}
+              </span>
+            )}
           </Link>
 
           <Link href="/analytics" onClick={() => setMobileMenuOpen(false)}
