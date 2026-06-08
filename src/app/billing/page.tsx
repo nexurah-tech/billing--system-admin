@@ -439,7 +439,7 @@ export default function BillingLedgerPage() {
                     {filteredShops.map((shop) => {
                       const daysText = getRemainingDaysText(shop);
                       const isUnpaid = shop.isExpired;
-                      const lastRenewal = payments.filter(p => p.shop?._id === shop.id).sort((a,b) => new Date(b.paymentDate).getTime() - new Date(a.paymentDate).getTime())[0];
+                      const lastRenewal = payments.filter(p => String(p.shop?.id) === String(shop.id)).sort((a,b) => new Date(b.paymentDate).getTime() - new Date(a.paymentDate).getTime())[0];
 
                       return (
                         <tr key={shop.id} className="hover:bg-indigo-500/[0.02] transition-colors group">
